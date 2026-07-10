@@ -1,0 +1,4 @@
+.cache/
+/fix-errant-gtid
+config.json
+*.sql

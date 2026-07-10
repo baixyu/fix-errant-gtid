@@ -1,0 +1,12 @@
+{
+  "mysql": {
+    "user": "repl",
+    "password": "password",
+    "port": 3306,
+    "params": {
+      "charset": "utf8mb4"
+    }
+  },
+  "new_master": {},
+  "old_master": {}
+}
