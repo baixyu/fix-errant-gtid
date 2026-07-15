@@ -1,6 +1,6 @@
 # fix_errant_gtid
 
-`fix_errant_gtid` compares GTID sets between a new master and an old master, streams the missing GTID transactions from the old master's binlog, converts row events into `INSERT` statements, and writes them to a SQL file.
+`fix_errant_gtid` compares GTID sets between a new master and an old master, streams the missing GTID transactions from the old master's binlog, converts row events into SQL statements, and writes them to a SQL file.
 
 ## Build
 
@@ -63,6 +63,6 @@ The tool combines binlog row values with `information_schema.COLUMNS` metadata t
 - `DECIMAL` values are emitted as numeric literals, not quoted strings.
 - Spatial columns are emitted as equivalent WKB-based expressions such as `ST_GeomFromWKB(0x...)`. Row binlogs do not preserve the original function call text, so an original `ST_GeomFromText(...)` insert cannot be reproduced byte-for-byte as the same SQL expression.
 
-The tool assumes row-based binlogs. It emits `INSERT` statements for `WRITE_ROWS` events and uses the after image for `UPDATE_ROWS` events. `DELETE_ROWS` events are reported as comments because they cannot be represented as inserts without changing semantics.
+The tool assumes row-based binlogs. It emits `INSERT` statements for `WRITE_ROWS` events, `UPDATE ... SET ... WHERE ... LIMIT 1` statements for `UPDATE_ROWS` events, and `DELETE ... WHERE ... LIMIT 1` statements for `DELETE_ROWS` events. Row-based binlogs do not preserve the original SQL text, so generated update and delete statements are equivalent row-level SQL reconstructed from before and after row images.
 
-For complete reconstructed rows, the old master should have `binlog_row_image=FULL`. If the binlog contains partial row images, columns not present in the row event are omitted from the generated `INSERT`.
+For complete reconstructed rows, the old master should have `binlog_row_image=FULL`. If the binlog contains partial row images, columns not present in the row event are omitted from generated `INSERT` column lists, `UPDATE` assignments or predicates, and `DELETE` predicates.

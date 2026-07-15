@@ -148,6 +148,85 @@ func TestWriteInsertSkipsMissingColumns(t *testing.T) {
 	assertMySQLCompatibleSyntax(t, sql)
 }
 
+func TestWriteDeleteUsesBeforeImage(t *testing.T) {
+	var out bytes.Buffer
+	a := &app{out: &out}
+	err := a.writeDelete(
+		tableName{Schema: "db", Table: "t"},
+		tableSchema{Columns: []columnSchema{
+			{Name: "id", DataType: "bigint"},
+			{Name: "name", DataType: "varchar", Text: true},
+			{Name: "deleted_at", DataType: "datetime"},
+		}},
+		[]interface{}{int64(1), "O'Reilly", nil},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("write delete: %v", err)
+	}
+
+	sql := out.String()
+	want := "DELETE FROM `db`.`t` WHERE `id` = 1 AND `name` = 'O''Reilly' AND `deleted_at` IS NULL LIMIT 1;"
+	if !strings.Contains(sql, want) {
+		t.Fatalf("unexpected SQL\nwant fragment: %s\n          got: %s", want, sql)
+	}
+	assertMySQLCompatibleSyntax(t, sql)
+}
+
+func TestWriteUpdateUsesBeforeWhereAndChangedAfterSet(t *testing.T) {
+	var out bytes.Buffer
+	a := &app{out: &out}
+	err := a.writeUpdate(
+		tableName{Schema: "db", Table: "t"},
+		tableSchema{Columns: []columnSchema{
+			{Name: "id", DataType: "bigint"},
+			{Name: "name", DataType: "varchar", Text: true},
+			{Name: "note", DataType: "varchar", Text: true},
+		}},
+		[]interface{}{int64(1), "old", "same"},
+		[]interface{}{int64(1), "new", "same"},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("write update: %v", err)
+	}
+
+	sql := out.String()
+	want := "UPDATE `db`.`t` SET `name` = 'new' WHERE `id` = 1 AND `name` = 'old' AND `note` = 'same' LIMIT 1;"
+	if !strings.Contains(sql, want) {
+		t.Fatalf("unexpected SQL\nwant fragment: %s\n          got: %s", want, sql)
+	}
+	assertMySQLCompatibleSyntax(t, sql)
+}
+
+func TestWriteUpdateSupportsPartialRowImages(t *testing.T) {
+	var out bytes.Buffer
+	a := &app{out: &out}
+	err := a.writeUpdate(
+		tableName{Schema: "db", Table: "t"},
+		tableSchema{Columns: []columnSchema{
+			{Name: "id", DataType: "bigint"},
+			{Name: "name", DataType: "varchar", Text: true},
+			{Name: "note", DataType: "varchar", Text: true},
+		}},
+		[]interface{}{int64(1), nil, nil},
+		[]interface{}{nil, "new", nil},
+		map[int]struct{}{1: {}, 2: {}},
+		map[int]struct{}{0: {}, 2: {}},
+	)
+	if err != nil {
+		t.Fatalf("write update: %v", err)
+	}
+
+	sql := out.String()
+	want := "UPDATE `db`.`t` SET `name` = 'new' WHERE `id` = 1 LIMIT 1;"
+	if !strings.Contains(sql, want) {
+		t.Fatalf("unexpected SQL\nwant fragment: %s\n          got: %s", want, sql)
+	}
+	assertMySQLCompatibleSyntax(t, sql)
+}
+
 func TestQuoteStringIsSafeForMySQL57And80SQLModes(t *testing.T) {
 	tests := []struct {
 		name string

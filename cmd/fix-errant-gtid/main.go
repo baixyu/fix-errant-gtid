@@ -332,7 +332,7 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("binlog stream ended before all errant GTIDs were parsed; missing %d GTIDs, examples: %s", len(a.pending), samplePending(a.pending, 5))
 	}
 
-	fmt.Printf("Wrote %d INSERT statements for %d errant GTIDs to %s\n", a.statements, len(pending), cfg.OutPath)
+	fmt.Printf("Wrote %d DML statements for %d errant GTIDs to %s\n", a.statements, len(pending), cfg.OutPath)
 	return nil
 }
 
@@ -402,8 +402,9 @@ func (a *app) writeHeader(newExecuted, oldExecuted *gomysql.MysqlGTIDSet) error 
 -- new master gtid_executed: %s
 -- old master gtid_executed: %s
 -- errant gtid set: %s
--- This file contains INSERT statements reconstructed from row binlog events.
--- Review the SQL before applying it. DELETE_ROWS events are emitted as comments.
+-- This file contains DML statements reconstructed from row binlog events.
+-- Row binlogs do not preserve the original SQL text; DELETE and UPDATE rows are emitted as equivalent row-level statements.
+-- Review the SQL before applying it.
 
 SET NAMES utf8mb4;
 
@@ -526,14 +527,20 @@ func (a *app) writeRowsEvent(ctx context.Context, eventType replication.EventTyp
 			}
 		}
 	case replication.UPDATE_ROWS_EVENTv0, replication.UPDATE_ROWS_EVENTv1, replication.UPDATE_ROWS_EVENTv2:
-		for i := 1; i < len(ev.Rows); i += 2 {
-			if err := a.writeInsert(name, schema, ev.Rows[i], skippedColumns(ev, i)); err != nil {
+		if len(ev.Rows)%2 != 0 {
+			return fmt.Errorf("update rows event for %s.%s has %d row images; expected before/after pairs", name.Schema, name.Table, len(ev.Rows))
+		}
+		for i := 0; i < len(ev.Rows); i += 2 {
+			if err := a.writeUpdate(name, schema, ev.Rows[i], ev.Rows[i+1], skippedColumns(ev, i), skippedColumns(ev, i+1)); err != nil {
 				return err
 			}
 		}
 	case replication.DELETE_ROWS_EVENTv0, replication.DELETE_ROWS_EVENTv1, replication.DELETE_ROWS_EVENTv2:
-		_, err := fmt.Fprintf(a.out, "-- DELETE_ROWS on %s.%s skipped: cannot be represented as INSERT SQL\n", quoteIdent(name.Schema), quoteIdent(name.Table))
-		return err
+		for i, row := range ev.Rows {
+			if err := a.writeDelete(name, schema, row, skippedColumns(ev, i)); err != nil {
+				return err
+			}
+		}
 	default:
 		_, err := fmt.Fprintf(a.out, "-- Unsupported row event type %s on %s.%s skipped\n", eventType.String(), quoteIdent(name.Schema), quoteIdent(name.Table))
 		return err
@@ -553,13 +560,13 @@ func skippedColumns(ev *replication.RowsEvent, rowIndex int) map[int]struct{} {
 }
 
 func (a *app) writeInsert(name tableName, schema tableSchema, row []interface{}, skipped map[int]struct{}) error {
-	if len(row) > len(schema.Columns) {
-		return fmt.Errorf("row for %s.%s has %d values, but table metadata has %d columns", name.Schema, name.Table, len(row), len(schema.Columns))
+	if err := validateRowLength(name, schema, row); err != nil {
+		return err
 	}
 	columns := make([]string, 0, len(row))
 	values := make([]string, 0, len(row))
 	for i, value := range row {
-		if _, ok := skipped[i]; ok {
+		if isSkipped(skipped, i) {
 			continue
 		}
 		column := schema.Columns[i]
@@ -582,6 +589,127 @@ func (a *app) writeInsert(name tableName, schema tableSchema, row []interface{},
 		a.statements++
 	}
 	return err
+}
+
+func (a *app) writeDelete(name tableName, schema tableSchema, row []interface{}, skipped map[int]struct{}) error {
+	where, err := rowWhereClause(name, schema, row, skipped)
+	if err != nil {
+		return err
+	}
+	if where == "" {
+		_, err := fmt.Fprintf(a.out, "-- DELETE_ROWS on %s.%s skipped: no columns were present in the before image\n", quoteIdent(name.Schema), quoteIdent(name.Table))
+		return err
+	}
+
+	_, err = fmt.Fprintf(
+		a.out,
+		"DELETE FROM %s.%s WHERE %s LIMIT 1;\n",
+		quoteIdent(name.Schema),
+		quoteIdent(name.Table),
+		where,
+	)
+	if err == nil {
+		a.statements++
+	}
+	return err
+}
+
+func (a *app) writeUpdate(name tableName, schema tableSchema, beforeRow, afterRow []interface{}, beforeSkipped, afterSkipped map[int]struct{}) error {
+	where, err := rowWhereClause(name, schema, beforeRow, beforeSkipped)
+	if err != nil {
+		return err
+	}
+	if where == "" {
+		_, err := fmt.Fprintf(a.out, "-- UPDATE_ROWS on %s.%s skipped: no columns were present in the before image\n", quoteIdent(name.Schema), quoteIdent(name.Table))
+		return err
+	}
+
+	assignments, err := updateAssignments(name, schema, beforeRow, afterRow, beforeSkipped, afterSkipped)
+	if err != nil {
+		return err
+	}
+	if len(assignments) == 0 {
+		_, err := fmt.Fprintf(a.out, "-- UPDATE_ROWS on %s.%s skipped: no columns were present in the after image\n", quoteIdent(name.Schema), quoteIdent(name.Table))
+		return err
+	}
+
+	_, err = fmt.Fprintf(
+		a.out,
+		"UPDATE %s.%s SET %s WHERE %s LIMIT 1;\n",
+		quoteIdent(name.Schema),
+		quoteIdent(name.Table),
+		strings.Join(assignments, ", "),
+		where,
+	)
+	if err == nil {
+		a.statements++
+	}
+	return err
+}
+
+func rowWhereClause(name tableName, schema tableSchema, row []interface{}, skipped map[int]struct{}) (string, error) {
+	if err := validateRowLength(name, schema, row); err != nil {
+		return "", err
+	}
+
+	conditions := make([]string, 0, len(row))
+	for i, value := range row {
+		if isSkipped(skipped, i) {
+			continue
+		}
+		column := schema.Columns[i]
+		if value == nil {
+			conditions = append(conditions, fmt.Sprintf("%s IS NULL", quoteIdent(column.Name)))
+			continue
+		}
+		conditions = append(conditions, fmt.Sprintf("%s = %s", quoteIdent(column.Name), sqlLiteralForColumn(value, column)))
+	}
+	return strings.Join(conditions, " AND "), nil
+}
+
+func updateAssignments(name tableName, schema tableSchema, beforeRow, afterRow []interface{}, beforeSkipped, afterSkipped map[int]struct{}) ([]string, error) {
+	if err := validateRowLength(name, schema, beforeRow); err != nil {
+		return nil, err
+	}
+	if err := validateRowLength(name, schema, afterRow); err != nil {
+		return nil, err
+	}
+
+	all := make([]string, 0, len(afterRow))
+	changed := make([]string, 0, len(afterRow))
+	for i, value := range afterRow {
+		if isSkipped(afterSkipped, i) {
+			continue
+		}
+		column := schema.Columns[i]
+		afterLiteral := sqlLiteralForColumn(value, column)
+		assignment := fmt.Sprintf("%s = %s", quoteIdent(column.Name), afterLiteral)
+		all = append(all, assignment)
+
+		if i >= len(beforeRow) || isSkipped(beforeSkipped, i) {
+			changed = append(changed, assignment)
+			continue
+		}
+		if sqlLiteralForColumn(beforeRow[i], column) != afterLiteral {
+			changed = append(changed, assignment)
+		}
+	}
+	if len(changed) > 0 {
+		return changed, nil
+	}
+	return all, nil
+}
+
+func validateRowLength(name tableName, schema tableSchema, row []interface{}) error {
+	if len(row) > len(schema.Columns) {
+		return fmt.Errorf("row for %s.%s has %d values, but table metadata has %d columns", name.Schema, name.Table, len(row), len(schema.Columns))
+	}
+	return nil
+}
+
+func isSkipped(skipped map[int]struct{}, index int) bool {
+	_, ok := skipped[index]
+	return ok
 }
 
 func (c *tableSchemaCache) get(ctx context.Context, name tableName) (tableSchema, error) {
