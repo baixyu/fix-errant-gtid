@@ -11,6 +11,7 @@ go build ./cmd/fix-errant-gtid
 ## Usage
 
 ```bash
+./fix-errant-gtid-linux -config config.json -out repair.sql new_master_ip  old_master_ip
 ./fix-errant-gtid \
   -config config.json \
   -out repair.sql \
