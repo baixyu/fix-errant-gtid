@@ -11,12 +11,8 @@ go build ./cmd/fix-errant-gtid
 ## Usage
 
 ```bash
-./fix-errant-gtid-linux -config config.json -out repair.sql new_master_ip  old_master_ip
-./fix-errant-gtid \
-  -config config.json \
-  -out repair.sql \
-  10.0.0.11 \
-  10.0.0.12
+./fix-errant-gtid -config config.json -out repair.sql new_master_ip  old_master_ip
+./fix-errant-gtid -config config.json -out repair.sql 10.0.0.11 10.0.0.12
 ```
 
 The two positional arguments are only the new master IP and old master IP. Authentication and port are read from the JSON config file.
