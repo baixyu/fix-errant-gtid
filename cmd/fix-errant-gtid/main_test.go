@@ -35,6 +35,21 @@ func TestSubtractGTIDSets(t *testing.T) {
 	}
 }
 
+func TestStreamStartGTIDSetIgnoresNewMasterOnlyGTIDs(t *testing.T) {
+	oldExecuted := mustParseGTIDSet(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100")
+	newExecuted := mustParseGTIDSet(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-90,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-5")
+
+	errant := subtractGTIDSets(oldExecuted, newExecuted)
+	if got, want := errant.String(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:91-100"; got != want {
+		t.Fatalf("unexpected errant set\nwant: %s\n got: %s", want, got)
+	}
+
+	start := streamStartGTIDSet(oldExecuted, errant)
+	if got, want := start.String(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-90"; got != want {
+		t.Fatalf("unexpected stream start set\nwant: %s\n got: %s", want, got)
+	}
+}
+
 func TestEnumerateGTIDs(t *testing.T) {
 	set := mustParseGTIDSet(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:4-5")
 

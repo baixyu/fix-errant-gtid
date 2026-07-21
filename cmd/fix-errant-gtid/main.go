@@ -299,6 +299,7 @@ func run(ctx context.Context, cfg config) error {
 		fmt.Println("No errant GTIDs found: old master has no GTID transactions missing from new master.")
 		return nil
 	}
+	streamStart := streamStartGTIDSet(oldExecuted, errant)
 
 	pending, err := enumerateGTIDs(errant, 100000)
 	if err != nil {
@@ -325,7 +326,7 @@ func run(ctx context.Context, cfg config) error {
 	if err := a.writeHeader(newExecuted, oldExecuted); err != nil {
 		return err
 	}
-	if err := a.streamErrantTransactions(ctx, newExecuted); err != nil {
+	if err := a.streamErrantTransactions(ctx, streamStart); err != nil {
 		return err
 	}
 	if len(a.pending) > 0 {
@@ -374,6 +375,10 @@ func subtractGTIDSets(left, right *gomysql.MysqlGTIDSet) *gomysql.MysqlGTIDSet {
 	out := left.Clone().(*gomysql.MysqlGTIDSet)
 	_ = out.Minus(*right)
 	return out
+}
+
+func streamStartGTIDSet(oldExecuted, errant *gomysql.MysqlGTIDSet) *gomysql.MysqlGTIDSet {
+	return subtractGTIDSets(oldExecuted, errant)
 }
 
 func enumerateGTIDs(set *gomysql.MysqlGTIDSet, limit uint64) (map[string]struct{}, error) {
