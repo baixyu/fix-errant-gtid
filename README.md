@@ -40,6 +40,35 @@ Example config:
 
 The old master account needs enough privilege to read metadata and stream binlogs, typically `REPLICATION SLAVE`/`REPLICATION CLIENT` plus `SELECT` on `information_schema`.
 
+## GTID Snapshot and Streaming
+
+The tool reads `@@GLOBAL.gtid_executed` from both servers before calculating errant transactions. To avoid comparing inconsistent GTID snapshots while replication or writes are still moving, it reads both servers twice:
+
+```text
+read new master gtid_executed
+read old master gtid_executed
+read new master gtid_executed again
+read old master gtid_executed again
+```
+
+If either server's GTID set changes between the two reads, that attempt is discarded and retried. The tool retries 3 times. If the GTID sets are still changing after those retries, it exits with an error instead of generating SQL from an unstable view of the topology.
+
+After a stable snapshot is found, errant GTIDs are calculated as:
+
+```text
+errant = old_master.gtid_executed - new_master.gtid_executed
+```
+
+The binlog stream connects to the old master. The GTID set passed to MySQL GTID auto-position is not the errant set itself; it is the old master's executed set with the errant transactions removed:
+
+```text
+stream_start = old_master.gtid_executed - errant
+```
+
+This tells the old master which of its own GTIDs the tool already has, so the stream returns the missing errant transactions. It also avoids sending GTIDs that exist only on the new master to the old master.
+
+For the most reliable result, run the tool when the old master is no longer accepting writes and the replication relationship between the old and new masters is stable. If the old master is still receiving the new master's transactions, or either server's `gtid_executed` is actively changing, the stable snapshot check may retry and eventually fail.
+
 ## MySQL Compatibility
 
 The generated SQL uses syntax compatible with MySQL 5.7 and MySQL 8.0:

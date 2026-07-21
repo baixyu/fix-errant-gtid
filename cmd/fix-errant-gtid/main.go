@@ -25,6 +25,8 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+const gtidSnapshotRetries = 3
+
 type config struct {
 	NewMasterIP string
 	OldMasterIP string
@@ -286,13 +288,18 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("ping old master: %w", err)
 	}
 
-	newExecuted, err := fetchGTIDExecuted(ctx, newDB)
+	newExecuted, oldExecuted, err := fetchStableGTIDSnapshot(
+		ctx,
+		func(ctx context.Context) (*gomysql.MysqlGTIDSet, error) {
+			return fetchGTIDExecuted(ctx, newDB)
+		},
+		func(ctx context.Context) (*gomysql.MysqlGTIDSet, error) {
+			return fetchGTIDExecuted(ctx, oldDB)
+		},
+		gtidSnapshotRetries,
+	)
 	if err != nil {
-		return fmt.Errorf("read new master gtid_executed: %w", err)
-	}
-	oldExecuted, err := fetchGTIDExecuted(ctx, oldDB)
-	if err != nil {
-		return fmt.Errorf("read old master gtid_executed: %w", err)
+		return err
 	}
 	errant := subtractGTIDSets(oldExecuted, newExecuted)
 	if errant.String() == "" {
@@ -357,6 +364,65 @@ func fetchGTIDExecuted(ctx context.Context, db *sql.DB) (*gomysql.MysqlGTIDSet, 
 		return parseMysqlGTIDSet("")
 	}
 	return parseMysqlGTIDSet(gtid.String)
+}
+
+func fetchStableGTIDSnapshot(
+	ctx context.Context,
+	readNew func(context.Context) (*gomysql.MysqlGTIDSet, error),
+	readOld func(context.Context) (*gomysql.MysqlGTIDSet, error),
+	retries int,
+) (*gomysql.MysqlGTIDSet, *gomysql.MysqlGTIDSet, error) {
+	if retries < 0 {
+		retries = 0
+	}
+
+	var lastNewBefore, lastNewAfter, lastOldBefore, lastOldAfter string
+	for attempt := 0; attempt <= retries; attempt++ {
+		newBefore, oldBefore, err := fetchGTIDSnapshot(ctx, readNew, readOld)
+		if err != nil {
+			return nil, nil, err
+		}
+		newAfter, oldAfter, err := fetchGTIDSnapshot(ctx, readNew, readOld)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if sameGTIDSet(newBefore, newAfter) && sameGTIDSet(oldBefore, oldAfter) {
+			return newAfter, oldAfter, nil
+		}
+
+		lastNewBefore, lastNewAfter = newBefore.String(), newAfter.String()
+		lastOldBefore, lastOldAfter = oldBefore.String(), oldAfter.String()
+	}
+
+	return nil, nil, fmt.Errorf(
+		"gtid_executed changed while reading a stable snapshot after %d retries; last new master before=%s after=%s; last old master before=%s after=%s",
+		retries,
+		lastNewBefore,
+		lastNewAfter,
+		lastOldBefore,
+		lastOldAfter,
+	)
+}
+
+func fetchGTIDSnapshot(
+	ctx context.Context,
+	readNew func(context.Context) (*gomysql.MysqlGTIDSet, error),
+	readOld func(context.Context) (*gomysql.MysqlGTIDSet, error),
+) (*gomysql.MysqlGTIDSet, *gomysql.MysqlGTIDSet, error) {
+	newExecuted, err := readNew(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read new master gtid_executed: %w", err)
+	}
+	oldExecuted, err := readOld(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read old master gtid_executed: %w", err)
+	}
+	return newExecuted, oldExecuted, nil
+}
+
+func sameGTIDSet(left, right *gomysql.MysqlGTIDSet) bool {
+	return left.String() == right.String()
 }
 
 func parseMysqlGTIDSet(gtid string) (*gomysql.MysqlGTIDSet, error) {

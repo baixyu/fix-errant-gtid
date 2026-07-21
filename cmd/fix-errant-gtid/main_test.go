@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,29 @@ func mustParseGTIDSet(t *testing.T, raw string) *gomysql.MysqlGTIDSet {
 		t.Fatalf("parse GTID set: %v", err)
 	}
 	return set
+}
+
+func gtidSequenceReader(t *testing.T, values ...string) func(context.Context) (*gomysql.MysqlGTIDSet, error) {
+	t.Helper()
+	index := 0
+	return func(context.Context) (*gomysql.MysqlGTIDSet, error) {
+		t.Helper()
+		if index >= len(values) {
+			t.Fatalf("gtid reader called %d times, want at most %d", index+1, len(values))
+			return nil, nil
+		}
+		set := mustParseGTIDSet(t, values[index])
+		index++
+		return set, nil
+	}
+}
+
+func constantGTIDReader(t *testing.T, value string) func(context.Context) (*gomysql.MysqlGTIDSet, error) {
+	t.Helper()
+	return func(context.Context) (*gomysql.MysqlGTIDSet, error) {
+		t.Helper()
+		return mustParseGTIDSet(t, value), nil
+	}
 }
 
 func TestSubtractGTIDSets(t *testing.T) {
@@ -47,6 +71,58 @@ func TestStreamStartGTIDSetIgnoresNewMasterOnlyGTIDs(t *testing.T) {
 	start := streamStartGTIDSet(oldExecuted, errant)
 	if got, want := start.String(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-90"; got != want {
 		t.Fatalf("unexpected stream start set\nwant: %s\n got: %s", want, got)
+	}
+}
+
+func TestFetchStableGTIDSnapshotRetriesUntilBothSidesStable(t *testing.T) {
+	newExecuted, oldExecuted, err := fetchStableGTIDSnapshot(
+		context.Background(),
+		gtidSequenceReader(t,
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-90",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-91",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-91",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-91",
+		),
+		gtidSequenceReader(t,
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1",
+		),
+		gtidSnapshotRetries,
+	)
+	if err != nil {
+		t.Fatalf("fetch stable snapshot: %v", err)
+	}
+	if got, want := newExecuted.String(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-91"; got != want {
+		t.Fatalf("unexpected new master snapshot\nwant: %s\n got: %s", want, got)
+	}
+	if got, want := oldExecuted.String(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1"; got != want {
+		t.Fatalf("unexpected old master snapshot\nwant: %s\n got: %s", want, got)
+	}
+}
+
+func TestFetchStableGTIDSnapshotErrorsAfterRetries(t *testing.T) {
+	_, _, err := fetchStableGTIDSnapshot(
+		context.Background(),
+		gtidSequenceReader(t,
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-2",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-3",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-4",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-5",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-6",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-7",
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-8",
+		),
+		constantGTIDReader(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100"),
+		gtidSnapshotRetries,
+	)
+	if err == nil {
+		t.Fatal("expected an error for an unstable GTID snapshot")
+	}
+	if !strings.Contains(err.Error(), "after 3 retries") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
