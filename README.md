@@ -2,6 +2,8 @@
 
 `fix_errant_gtid` compares GTID sets between a new master and an old master, streams the missing GTID transactions from the old master's binlog, converts row events into SQL statements, and writes them to a SQL file.
 
+Typical use case: an asynchronous MySQL replication topology performs an abnormal failover, and the promoted new master is missing some committed transactions that still exist in the old master's binlogs. The tool identifies those old-master-only GTID transactions and reconstructs equivalent row-level SQL that can be reviewed and applied to repair the new master.
+
 ## Build
 
 ```bash
